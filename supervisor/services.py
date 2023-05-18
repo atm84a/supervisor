@@ -40,6 +40,7 @@ class ConfigReg(object):
         self.service_config_dir_key = self.service_name + " Service"
         self.service_name_key = "Name"
         self.config_name_key = "Config"
+        self.service_log_folder_key = "LogFolder"
 
     @property
     def software_key(self):
@@ -74,6 +75,16 @@ class ConfigReg(object):
     def filepath(self, value):
         """set supervisor config path"""
         self[self.config_name_key] = value
+
+    @property
+    def service_log_folder(self):
+        """get supervisor service log folder"""
+        return self[self.service_log_folder_key]
+
+    @service_log_folder.setter
+    def service_log_folder(self, value):
+        """set supervisor service log folder"""
+        self[self.service_log_folder_key] = value
 
     def get(self, name, *args):
         try:
@@ -138,8 +149,26 @@ class SupervisorService(SupervisorServiceFramework):
         self.lstderr = StreamHandler(self.logger.error)
 
     def initialize(self):
+        config_path, config_dir, conf_exception = self.get_config_path()
+        log_dir, log_exception = self.get_log_dir()
+        log_dir = log_dir or config_dir or os.getcwd()
+
+        self.supervisor_conf = config_path
         self.logger = self.get_logger()
-        self.supervisor_conf = self.get_config()
+        self.initialize_logging(log_dir)
+
+        if log_exception is not None:
+            self.logger.info(log_exception)
+            self.logger.info("* A registry record for the service log filepath is missing. "
+                             "Default directory will be used.")
+        self.logger.info("Supervisor Windows service config path: {0!s}".format(config_path))
+
+        if conf_exception is not None:
+            self.logger.error("* A registry record for supervisor config filepath cannot be read. "
+                              "The service needs to be reinstalled.")
+            self.logger.error(conf_exception)
+            exit(-1)
+
 
     @staticmethod
     def slugify(value):
@@ -159,38 +188,49 @@ class SupervisorService(SupervisorServiceFramework):
         """interface to create logger"""
         return logging.getLogger(__name__)
 
-    def get_config(self):
+    def get_config_path(self):
         """Get supervisor config path
         :rtype: str
         """
         # Gets the path of the registry configuration file
         try:
-            supervisor_conf_exc = None
             supervisor_conf = self.settings.filepath
+            supervisor_conf_exc = None
         except WindowsError:
-            supervisor_conf_exc = traceback.format_exc()
             supervisor_conf = None
+            supervisor_conf_exc = traceback.format_exc()
 
-        # The log goes to the location of the configuration file
         if supervisor_conf is not None:
-            config_dir = os.path.dirname(supervisor_conf)
-        else:  # or to python home
-            config_dir = os.getcwd()
+            supervisor_conf_dir = os.path.dirname(supervisor_conf)
+        else:
+            supervisor_conf_dir = None
 
-        log_path = os.path.join(config_dir, self.slugify(self._svc_name_) + "-service.log")
+        return supervisor_conf, supervisor_conf_dir, supervisor_conf_exc
+
+    def get_log_dir(self):
+        """Get a path to a log file for the supervisor Windows service.
+        :rtype: str
+        """
+        try:
+            exc = None
+            result = self.settings.service_log_folder
+        except WindowsError:
+            exc = traceback.format_exc()
+            result = None
+
+        return result, exc
+
+    def initialize_logging(self, log_dir):
+        """Configures the service to send logs to a file in the provided folder
+        """
+        log_path = os.path.join(log_dir, self.slugify(self._svc_name_) + "-service.log")
         hdl = logging.handlers.RotatingFileHandler(log_path,
                                                    maxBytes=1024 ** 2,
                                                    backupCount=3)
+
         hdl.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
         self.logger.setLevel(logging.INFO)
         self.logger.addHandler(hdl)
-        self.logger.info("supervisor config path: {0!s}".format(supervisor_conf))
-
-        if supervisor_conf_exc is not None:
-            self.logger.error("* The service needs to be reinstalled")
-            self.logger.error(supervisor_conf_exc)
-            exit(-1)
-        return supervisor_conf
 
     @classmethod
     def set_service_name(cls, name):
@@ -313,6 +353,9 @@ def get_config_args(argv):
          'kwargs': {'type': argparse.FileType('r'),
                     'help': 'full filepath to supervisor.conf',
                     'required': check_existing_cmd(argv, 'install', 'update')}},
+        {'args': ('-slf', '--service-log-folder'),
+         'kwargs': {'required': False, 'type': str,
+                    'help': 'full path to folder for supervisor service log file'}},
         {'args': ('-sn', '--service-name'),
          'kwargs': {'required': False, 'type': str}},
         {'args': ('-sdn', '--service-display-name'),
@@ -367,6 +410,9 @@ def installer(argv):
     # supervisor conf
     elif options.config:
         settings.filepath = options.config.name
+    # custom service log folder
+    if options.service_log_folder:
+        settings.service_log_folder = options.service_log_folder
     # custom service name
     if options.service_name:
         settings[settings.service_name_key] = options.service_name
